@@ -1,0 +1,42 @@
+# Run E2E with local ingest, processor and metadata
+
+## Prepare
+
+cd /data_1/squid-reef/substrate-metadata && npm i && npm run build
+cd /data_1/squid-reef/substrate-processor && npm i && npm run build
+cd /data_1/squid-reef/substrate-typegen && npm run build
+cd /data_1/squid-reef/substrate-ingest && npm i
+cd /data_1/squid-substrate-template-reef && npm i
+
+- Generate entities from schema.graphql
+make codegen
+
+
+## Run
+
+- Start archive db (localhost:29387) and gateway (localhost:2938/graphql) containers
+cd /data_1/squid-reef/substrate-ingest && sudo make up
+
+- Start local ingest:
+npm run start
+
+- Generate metadata from typegen.json
+cd /data_1/squid-substrate-template-reef && make typegen
+
+- Start subsquid db (localhost:23798)
+cd /data_1/squid-substrate-template-reef && sudo make up
+
+- Start processor
+npm run processor:start_ts
+
+- Start API gateway (localhost:4350/graphql)
+npx squid-graphql-server 
+
+
+## Stop
+
+- Stop archive db and gateway:
+cd /data_1/squid-reef/substrate-ingest && sudo make down
+
+- Stop subsquid db:
+cd /data_1/squid-substrate-template-reef && sudo make down

@@ -1,20 +1,14 @@
-import {lookupArchive} from "@subsquid/archive-registry"
 import * as ss58 from "@subsquid/ss58"
 import {BatchContext, BatchProcessorItem, SubstrateBatchProcessor} from "@subsquid/substrate-processor"
 import {Store, TypeormDatabase} from "@subsquid/typeorm-store"
 import {In} from "typeorm"
 import {Account, Transfer} from "./model"
-import {BalancesTransferEvent} from "./types/events"
-
+import { BalancesTransferEvent } from "./types/events"
 
 const processor = new SubstrateBatchProcessor()
-    .setBatchSize(500)
+    .setBlockRange( {from: 0, to: 3000} )
     .setDataSource({
-        // Lookup archive by the network name in the Subsquid registry
-        archive: lookupArchive("kusama", {release: "FireSquid"})
-
-        // Use archive created by archive/docker-compose.yml
-        // archive: 'http://localhost:8888/graphql'
+        archive: 'http://localhost:2938/graphql'
     })
     .addEvent('Balances.Transfer', {
         data: {
@@ -90,22 +84,16 @@ function getTransfers(ctx: Ctx): TransferEvent[] {
             if (item.name == "Balances.Transfer") {
                 let e = new BalancesTransferEvent(ctx, item.event)
                 let rec: {from: Uint8Array, to: Uint8Array, amount: bigint}
-                if (e.isV1020) {
-                    let [from, to, amount,] = e.asV1020
-                    rec = {from, to, amount}
-                } else if (e.isV1050) {
-                    let [from, to, amount] = e.asV1050
-                    rec = {from, to, amount}
-                } else {
-                    rec = e.asV9130
-                }
+                let [from, to, amount,] = e.asV5
+                rec = {from, to, amount}
+
                 transfers.push({
                     id: item.event.id,
                     blockNumber: block.header.height,
                     timestamp: new Date(block.header.timestamp),
                     extrinsicHash: item.event.extrinsic?.hash,
-                    from: ss58.codec('kusama').encode(rec.from),
-                    to: ss58.codec('kusama').encode(rec.to),
+                    from: ss58.codec('substrate').encode(rec.from),
+                    to: ss58.codec('substrate').encode(rec.to),
                     amount: rec.amount,
                     fee: item.event.extrinsic?.fee || 0n
                 })
