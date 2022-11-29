@@ -1,115 +1,160 @@
-import * as ss58 from "@subsquid/ss58"
-import {BatchContext, BatchProcessorItem, SubstrateBatchProcessor} from "@subsquid/substrate-processor"
-import {Store, TypeormDatabase} from "@subsquid/typeorm-store"
-import {In} from "typeorm"
-import {Account, Transfer} from "./model"
-import { BalancesTransferEvent } from "./types/events"
+import { Store, TypeormDatabase } from "@subsquid/typeorm-store";
+import {
+  BatchContext,
+  BatchProcessorItem,
+  EvmLogEvent,
+  SubstrateBatchProcessor,
+  SubstrateBlock,
+} from "@subsquid/substrate-processor";
+import { In } from "typeorm";
+import { ethers } from "ethers";
+import { Provider } from '@reef-defi/evm-provider';
+import { WsProvider } from '@polkadot/api';
 
+import { CHAIN_NODE, sqwidErc1155Address, getContractEntity } from "./contract";
+import { ERC1155Owner, ERC1155Token, ERC1155Transfer } from "./model";
+import * as erc1155 from "./abi/erc1155";
+
+const provider = new Provider({
+    provider: new WsProvider(CHAIN_NODE),
+  });
+const database = new TypeormDatabase();
 const processor = new SubstrateBatchProcessor()
-    .setBlockRange( {from: 0, to: 3000} )
-    .setDataSource({
-        archive: 'http://localhost:2938/graphql'
-    })
-    .addEvent('Balances.Transfer', {
-        data: {
-            event: {
-                args: true,
-                extrinsic: {
-                    hash: true,
-                    fee: true
-                }
-            }
-        }
-    } as const)
+  .setBlockRange( {from: 4_613_263, to: 4_620_000} )
+  .setDataSource({
+    chain: CHAIN_NODE,
+    archive: 'http://localhost:2938/graphql'
+  })
+  .addEvmLog(sqwidErc1155Address, {
+    filter: [erc1155.events["TransferSingle(address,address,address,uint256,uint256)"].topic],
+  });
 
+type Item = BatchProcessorItem<typeof processor>;
+type Context = BatchContext<Store, Item>;
 
-type Item = BatchProcessorItem<typeof processor>
-type Ctx = BatchContext<Store, Item>
+processor.run(database, async (ctx) => {
+  await provider.api.isReadyOrError;
 
+  const transfersData: TransferData[] = [];
 
-processor.run(new TypeormDatabase(), async ctx => {
-    let transfersData = getTransfers(ctx)
-
-    let accountIds = new Set<string>()
-    for (let t of transfersData) {
-        accountIds.add(t.from)
-        accountIds.add(t.to)
+  for (const block of ctx.blocks) {
+    for (const item of block.items) {
+      if (item.name === "EVM.Log") {
+        const transfer = handleTransfer(block.header, item.event);
+        transfersData.push(transfer);
+      }
     }
+  }
 
-    let accounts = await ctx.store.findBy(Account, {id: In([...accountIds])}).then(accounts => {
-        return new Map(accounts.map(a => [a.id, a]))
-    })
+  await saveTransfers(ctx, transfersData);
+});
 
-    let transfers: Transfer[] = []
+type TransferData = {
+  id: string;
+  tokenId: ethers.BigNumber;
+  from: string;
+  to: string;
+  amount: number;
+  timestamp: bigint;
+  block: number;
+  transactionHash: string;
+};
 
-    for (let t of transfersData) {
-        let {id, blockNumber, timestamp, extrinsicHash, amount, fee} = t
+function handleTransfer(
+  block: SubstrateBlock,
+  event: EvmLogEvent
+): TransferData {
+  const { operator, from, to, id, value } = erc1155.events[
+    "TransferSingle(address,address,address,uint256,uint256)"
+  ].decode(((event.args.log || event.args)));
 
-        let from = getAccount(accounts, t.from)
-        let to = getAccount(accounts, t.to)
+  const transfer: TransferData = {
+    id: event.id,
+    tokenId: id,
+    from,
+    to,
+    amount: value.toNumber(),
+    timestamp: BigInt(block.timestamp),
+    block: block.height,
+    transactionHash: event.evmTxHash,
+  };
 
-        transfers.push(new Transfer({
-            id,
-            blockNumber,
-            timestamp,
-            extrinsicHash,
-            from,
-            to,
-            amount,
-            fee
-        }))
-    }
-
-    await ctx.store.save(Array.from(accounts.values()))
-    await ctx.store.insert(transfers)
-})
-
-
-interface TransferEvent {
-    id: string
-    blockNumber: number
-    timestamp: Date
-    extrinsicHash?: string
-    from: string
-    to: string
-    amount: bigint
-    fee?: bigint
+  return transfer;
 }
 
+async function saveTransfers(ctx: Context, transfersData: TransferData[]) {
+  const tokensIds: Set<string> = new Set();
+  const ownersIds: Set<string> = new Set();
 
-function getTransfers(ctx: Ctx): TransferEvent[] {
-    let transfers: TransferEvent[] = []
-    for (let block of ctx.blocks) {
-        for (let item of block.items) {
-            if (item.name == "Balances.Transfer") {
-                let e = new BalancesTransferEvent(ctx, item.event)
-                let rec: {from: Uint8Array, to: Uint8Array, amount: bigint}
-                let [from, to, amount,] = e.asV5
-                rec = {from, to, amount}
+  for (const transferData of transfersData) {
+    tokensIds.add(transferData.tokenId.toString());
+    ownersIds.add(transferData.from);
+    ownersIds.add(transferData.to);
+  }
 
-                transfers.push({
-                    id: item.event.id,
-                    blockNumber: block.header.height,
-                    timestamp: new Date(block.header.timestamp),
-                    extrinsicHash: item.event.extrinsic?.hash,
-                    from: ss58.codec('substrate').encode(rec.from),
-                    to: ss58.codec('substrate').encode(rec.to),
-                    amount: rec.amount,
-                    fee: item.event.extrinsic?.fee || 0n
-                })
-            }
-        }
+  const transfers: Set<ERC1155Transfer> = new Set();
+
+  const tokens: Map<string, ERC1155Token> = new Map(
+    (await ctx.store.findBy(ERC1155Token, { id: In([...tokensIds]) })).map((token) => [
+      token.id,
+      token,
+    ])
+  );
+
+  const owners: Map<string, ERC1155Owner> = new Map(
+    (await ctx.store.findBy(ERC1155Owner, { id: In([...ownersIds]) })).map((owner) => [
+      owner.id,
+      owner,
+    ])
+  );
+
+  for (const transferData of transfersData) {
+    const contract = new erc1155.Contract(
+      sqwidErc1155Address,
+      provider
+    );
+
+    let from = owners.get(transferData.from);
+    if (from == null) {
+      from = new ERC1155Owner({ id: transferData.from, balance: 0n });
+      owners.set(from.id, from);
     }
-    return transfers
-}
 
-
-function getAccount(m: Map<string, Account>, id: string): Account {
-    let acc = m.get(id)
-    if (acc == null) {
-        acc = new Account()
-        acc.id = id
-        m.set(id, acc)
+    let to = owners.get(transferData.to);
+    if (to == null) {
+      to = new ERC1155Owner({ id: transferData.to, balance: 0n });
+      owners.set(to.id, to);
     }
-    return acc
+
+    const tokenId = transferData.tokenId.toString();
+
+    let token = tokens.get(tokenId);
+    if (token == null) {
+      token = new ERC1155Token({
+        id: tokenId,
+        uri: await contract.uri(transferData.tokenId),
+        contract: await getContractEntity(ctx.store),
+      });
+      tokens.set(token.id, token);
+    }
+    token.owner = to;
+
+    const { id, block, transactionHash, timestamp } = transferData;
+
+    const transfer = new ERC1155Transfer({
+      id,
+      block,
+      timestamp,
+      transactionHash,
+      from,
+      to,
+      token,
+    });
+
+    transfers.add(transfer);
+  }
+
+  await ctx.store.save([...owners.values()]);
+  await ctx.store.save([...tokens.values()]);
+  await ctx.store.save([...transfers]);
 }

@@ -1,42 +1,69 @@
+Docs: https://docs.subsquid.io/quickstart/quickstart-substrate/
+      https://docs.subsquid.io/tutorials/create-an-evm-processing-squid/
+Template: https://github.com/subsquid/squid-frontier-evm-template.git
+Examples: https://github.com/subsquid/squid-substrate-examples
+Squid: https://github.com/subsquid/squid
+
+
 # Run E2E with local ingest, processor and metadata
 
-## Prepare
+## Ingest
 
+Prepare
+=======
 cd /data_1/squid-reef/substrate-metadata && npm i && npm run build
 cd /data_1/squid-reef/substrate-processor && npm i && npm run build
 cd /data_1/squid-reef/substrate-typegen && npm run build
 cd /data_1/squid-reef/substrate-ingest && npm i
-cd /data_1/squid-substrate-template-reef && npm i
 
-- Generate entities from schema.graphql
-make codegen
+Start
+=====
+- Start archive db (localhost:29387) and gateway (http://localhost:2938) containers
+cd /data_1/squid-reef/substrate-ingest && make up && npm run start
 
 
-## Run
+## Processor
 
-- Start archive db (localhost:29387) and gateway (localhost:2938/graphql) containers
-cd /data_1/squid-reef/substrate-ingest && sudo make up
+Prepare
+=======
+cd /data_1/squid-substrate-template-reef
 
-- Start local ingest:
-npm run start
+- Install dependencies
+npm i
 
-- Generate metadata from typegen.json
-cd /data_1/squid-substrate-template-reef && make typegen
+- Update schema (deletes DB) https://github.com/subsquid/squid-frontier-evm-template/blob/master/FAQ.md#how-do-i-update-my-schema
+bash reset-schema.sh
+
+- Generate entities from schema.graphql (output in src/model/generated)
+make codegen (npx squid-typeorm-codegen)
+
+- Generate TypeScript metadata wrappers from typegen.json (output in src/types)
+make typegen (npx squid-substrate-typegen typegen.json)
+
+- Generate TypeScript interfaces from ABI
+npx squid-evm-typegen --abi src/abi/ERC1155.json --output src/abi/erc1155.ts
 
 - Start subsquid db (localhost:23798)
-cd /data_1/squid-substrate-template-reef && sudo make up
+make up
+
+- Delete migration files, generate new one and apply
+rm -rf db/migrations/*.js 
+make migration (npx squid-typeorm-migration generate)
+make migrate (npx squid-typeorm-migration apply)
+
+- Build
+make build (npm run build)
 
 - Start processor
-npm run processor:start_ts
+make process (node -r dotenv/config lib/processor.js)
 
-- Start API gateway (localhost:4350/graphql)
-npx squid-graphql-server 
-
+- Start API gateway (http://localhost:4350)
+make serve (npx squid-graphql-server --subscriptions)
 
 ## Stop
 
 - Stop archive db and gateway:
-cd /data_1/squid-reef/substrate-ingest && sudo make down
+cd /data_1/squid-reef/substrate-ingest && make down
 
 - Stop subsquid db:
-cd /data_1/squid-substrate-template-reef && sudo make down
+cd /data_1/squid-substrate-template-reef && make down

@@ -5,13 +5,6 @@ process: migrate
 build:
 	@npm run build
 
-build-processor-image:
-	@docker build . --target processor -t squid-processor
-
-build-query-node-image:
-	@docker build . --target query-node -t query-node
-
-build-images: build-processor-image build-query-node-image
 
 serve:
 	@npx squid-graphql-server --subscriptions
@@ -19,6 +12,10 @@ serve:
 
 migrate:
 	@npx squid-typeorm-migration apply
+
+
+migration:
+	@npx squid-typeorm-migration generate
 
 
 codegen:
